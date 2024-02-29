@@ -11,6 +11,8 @@ class Receiver:
 
         self.remote_host = None
         self.remote_port = None
+        
+        self.received_sequence_numbers = []
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -20,6 +22,7 @@ class Receiver:
         sys.stderr.flush()
 
     def run(self):
+        duplicate = 0
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
@@ -32,14 +35,14 @@ class Receiver:
 
                 msg = json.loads(data.decode('utf-8'))
                 self.log("Received data message %s" % msg)
-
-                # Print out the data to stdout
-                print(msg["data"], end='', flush=True)
+                
+                if msg['sequence_number'] not in self.received_sequence_numbers:
+                    # Print out the data to stdout
+                    print(msg["data"], end='', flush=True)
+                    self.received_sequence_numbers.append(msg['sequence_number'])
 
                 # Always send back an ack
                 self.send({ "type": "ack" })
-
-
         return
 
 if __name__ == "__main__":

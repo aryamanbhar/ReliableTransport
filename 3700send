@@ -3,6 +3,7 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 DATA_SIZE = 1375
+WINDOW_SIZE = 2
 
 class Sender:
     def __init__(self, host, port):
@@ -12,6 +13,7 @@ class Sender:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
+        self.sequence_number = 1
 
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -21,6 +23,7 @@ class Sender:
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
 
     def run(self):
+        sent_packets = 0
         while True:
             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
 
@@ -33,17 +36,24 @@ class Sender:
                     self.log("Received message '%s'" % msg)
                     self.waiting = False
                 elif conn == sys.stdin:
-                    data = sys.stdin.read(DATA_SIZE)
-                    if len(data) == 0:
-                        self.log("All done!")
-                        sys.exit(0)
-
-                    msg = { "type": "msg", "data": data }
-                    self.log("Sending message '%s'" % msg)
-                    self.send(msg)
+                    
+                    while sent_packets < WINDOW_SIZE:
+                        sent_packets += 1
+                        self.send_packet()
+                    sent_packets = 0
                     self.waiting = True
-
         return
+    
+    def send_packet(self):
+        data = sys.stdin.read(DATA_SIZE)
+        if len(data) == 0:
+            self.log("All done!")
+            sys.exit(0)
+
+        msg = {"sequence_number": self.sequence_number, "type": "msg", "data": data }
+        self.log("Sending message '%s'" % msg)
+        self.send(msg)
+        self.sequence_number+=len(data)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')
