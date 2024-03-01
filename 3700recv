@@ -11,8 +11,7 @@ class Receiver:
 
         self.remote_host = None
         self.remote_port = None
-        
-        self.received_sequence_numbers = []
+        self.expected_sequence_number = 0
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -22,31 +21,34 @@ class Receiver:
         sys.stderr.flush()
 
     def run(self):
-        duplicate = 0
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
 
-                # Grab the remote host/port if we don't alreadt have it
+                # Grab the remote host/port if we don't already have it
                 if self.remote_host is None:
                     self.remote_host = addr[0]
                     self.remote_port = addr[1]
 
                 msg = json.loads(data.decode('utf-8'))
                 self.log("Received data message %s" % msg)
-                
-                if msg['sequence_number'] not in self.received_sequence_numbers:
+
+                # Check if the received packet is the expected one
+                if msg["sequence_number"] == self.expected_sequence_number:
                     # Print out the data to stdout
                     print(msg["data"], end='', flush=True)
-                    self.received_sequence_numbers.append(msg['sequence_number'])
 
-                # Always send back an ack
-                self.send({ "type": "ack" })
+                    # Update the expected sequence number
+                    self.expected_sequence_number += 1
+
+                # Always send back an ack for the last successfully received packet
+                self.send({ "type": "ack", "acknowledgment": self.expected_sequence_number - 1 })
+
         return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='receive data')
     args = parser.parse_args()
-    sender = Receiver()
-    sender.run()
+    receiver = Receiver()
+    receiver.run()
