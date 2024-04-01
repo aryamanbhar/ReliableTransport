@@ -1,54 +1,71 @@
+
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, math, zlib
 
+# Class for receiver
 class Receiver:
-    def __init__(self):
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.bind(('0.0.0.0', 0))
-        self.port = self.socket.getsockname()[1]
-        self.log("Bound to port %d" % self.port)
+	# Initialize connection and global variables
+	def __init__(self):
+		self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		self.socket.bind(('0.0.0.0', 0))
+		self.port = self.socket.getsockname()[1]
+		self.log("Bound to port %d" % self.port)
 
-        self.remote_host = None
-        self.remote_port = None
-        self.expected_sequence_number = 0
+		self.remote_host = None
+		self.remote_port = None
+		self.current_sequence = 0
+		self.buffer = {}
+		self.sequences = []
 
-    def send(self, message):
-        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
+	# Send message to sender
+	def send(self, message):
+		self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
 
-    def log(self, message):
-        sys.stderr.write(message + "\n")
-        sys.stderr.flush()
+	# Log message to stderr
+	def log(self, message):
+		sys.stderr.write(message + "\n")
+		sys.stderr.flush()
 
-    def run(self):
-        while True:
-            socks = select.select([self.socket], [], [])[0]
-            for conn in socks:
-                data, addr = conn.recvfrom(65535)
+	# Send an ACK to sender for the given message
+	def send_ack(self, msg):
+		self.log("Recevied message with sequence number: " + str(msg["seq"]))
+		self.send({"type": "ack", "data": msg["data"], "seq": msg["seq"]})
+   
+	# Run the receiver
+	def run(self):
+		while True:
+			socks = select.select([self.socket], [], [])[0]
+			for conn in socks:
+				data, addr = conn.recvfrom(65535)
+				# Grab the remote host/port if we don't alreadt have it
+				if self.remote_host is None:
+					self.remote_host = addr[0]
+					self.remote_port = addr[1]
 
-                # Grab the remote host/port if we don't already have it
-                if self.remote_host is None:
-                    self.remote_host = addr[0]
-                    self.remote_port = addr[1]
+				msg = json.loads(data.decode('utf-8'))
+				self.send_ack(msg)
+				# If received packet is not a duplicate (we have not seen the sequence number before)
+				if not msg["seq"] in self.sequences:
+					self.sequences.append(msg["seq"])
 
-                msg = json.loads(data.decode('utf-8'))
-                self.log("Received data message %s" % msg)
+					# If packet is received in the sequence
+					if msg["seq"] == self.current_sequence:
+						self.current_sequence += 1
+						print(msg["data"], end='', flush=True)
 
-                # Check if the received packet is the expected one
-                if msg["sequence_number"] == self.expected_sequence_number:
-                    # Print out the data to stdout
-                    print(msg["data"], end='', flush=True)
+						# Check if there are packets buffered that can now be processed
+						while self.current_sequence in self.buffer:
+							packet = self.buffer.pop(self.current_sequence)
+							self.current_sequence += 1
+							print(packet["data"], end='', flush=True)
 
-                    # Update the expected sequence number
-                    self.expected_sequence_number += 1
-
-                # Always send back an ack for the last successfully received packet
-                self.send({ "type": "ack", "acknowledgment": self.expected_sequence_number - 1 })
-
-        return
+					else:  # if msg["seq"] != self.current_sequence (OUT OF ORDER), store it in the buffer
+						self.buffer[msg["seq"]] = msg
+		return
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='receive data')
-    args = parser.parse_args()
-    receiver = Receiver()
-    receiver.run()
+	parser = argparse.ArgumentParser(description='receive data')
+	args = parser.parse_args()
+	sender = Receiver()
+	sender.run()
