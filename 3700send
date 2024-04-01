@@ -1,63 +1,145 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse
+import socket
+import time
+import json
+import select
+import struct
+import sys
+import math
+import ast
+import zlib
 
 DATA_SIZE = 1375
-WINDOW_SIZE = 2  #Initially window is 2 (send 2 packets without waiting for ack)
+ALPHA = 0.875
+INITIAL_THRESHOLD = 100
+INITIAL_WINDOW = 4
 
+# Class for the sender
 class Sender:
+    # Initialize connection and global variables
     def __init__(self, host, port):
         self.host = host
         self.remote_port = int(port)
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
-        self.window = []
-        self.sequence_number = 0
-        self.base = 0
-        self.nextseqnum = 0
         self.waiting = False
+        self.all_packets = []
+        self.in_flight_packets = []
+        self.sequence_num = 0
+        self.sequences_sent = []
+        self.RTT = 1
+        self.RTO = 2
+        self.window = INITIAL_WINDOW
+        self.ss_thresh = INITIAL_THRESHOLD
 
+    # Log the given message to stderr
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
+    # Send the given message to receiver
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+         
+    def parse_response(self, msg):
+            for packet in self.in_flight_packets:
+                        if (msg["seq"] == packet["seq"]):
 
+                            # Calculate new RTT and RTO
+                            new_sample = (time.time() - packet["timesent"]) 
+                            
+                            new_RTT = (ALPHA * (self.RTT/ 1000)) + ((1 - ALPHA) * (new_sample / 1000))
+                            self.RTT -= new_RTT
+                            self.RTO = 2 * self.RTT
+                            self.log("RTT: " + str(self.RTT) + "RTO: " + str(self.RTO)) 
+                            
+                            #Slow start
+                            if self.window < self.ss_thresh:
+                                self.window += 1
+                            #Congestion avoidance
+                            else:
+                                self.window = int(self.window + 1 /self.window)
+        
+                            self.log("Adjusted window size: " + str(self.window))        
+                                                    
+                            #Can remove the packet now
+                            self.in_flight_packets.remove(packet)
+            
+                        
+            self.waiting = False   
+            # Once removed all the packets in transit got to exit
+            if (len(self.in_flight_packets) == 0):
+                self.log("All done!")
+                sys.exit(0)
+                
+    #Resend packets if they have exceeded the RTT without an ACK (have been dropped)
+    def resend_dropped(self):
+        for packet in self.in_flight_packets:
+
+            #When timeout occurs
+            if (packet["timesent"] + self.RTO < time.time()):
+                
+                #Timeout and multiplicative decrease
+                self.ss_thresh = self.window / 2
+                self.window = 1
+
+                self.log("Adjusted window size: " + str(self.window))
+
+                # Resend the packet
+                packet["timesent"] = time.time()
+                self.log("Resending packet: " +  str(packet["seq"]))
+                self.send(packet)
+
+    
+    #sending packets in the window currently
+    def send_no_duplicate_packets(self):
+        
+        while ((len(self.in_flight_packets) < self.window) and self.all_packets):
+            for packet in self.all_packets:
+                if packet["seq"] not in self.sequences_sent:
+                    packet["timesent"] = time.time() #update it with the current time
+                    self.send(packet)
+                    self.sequences_sent.append(packet["seq"]) 
+                    self.in_flight_packets.append(packet)
+                    self.all_packets.remove(packet)  # Now remove the sent packet mark from all_packets 
+                else:
+                    #Remove the packet right away
+                    self.all_packets.remove(packet)
+            #Now wait for receiver response
+            self.waiting = True
+        
     def run(self):
         while True:
-            
-            #to properly send data to receiver
-            if len(self.window) < WINDOW_SIZE and not self.waiting: #sender not waiting for data and can fit packet into window
-                data = sys.stdin.read(DATA_SIZE)
-                if len(data) == 0:
-                    self.log("All done!")
-                    sys.exit(0)
-                msg = { "type": "msg", "data": data, "sequence_number": self.sequence_number} 
-                self.sequence_number += 1
-                msg["timesent"] = time.time()
-                self.log("Sending message '%s'" % msg)
-                self.send(msg)
-                self.window.append(msg) #add data to the window
-                self.nextseqnum += 1
-                self.waiting = True
+            sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
+            socks = select.select(sockets, [], [], 0.1)[0]
+            for conn in socks:
+                
+                # Receive ack from receiver
+                if conn == self.socket:
+                    k, addr = conn.recvfrom(65535)
+                    msg = k.decode('utf-8')
+                    msg = json.loads(msg)
+                    self.parse_response(msg)
 
-            #Handling the acknowledgement from receiver
-            if self.window:  # if window not empty
-                self.socket.settimeout(0.1)  # Set a timeout of 0.1 seconds for the socket operations
-                try:
-                    k, addr = self.socket.recvfrom(65535)  # Attempt to receive an acknowledgment
-                    ack = json.loads(k.decode('utf-8'))
-                    self.log("Received ACK for sequence number: %s" % ack['acknowledgment'])
-                    self.base = max(self.base, ack['acknowledgment'] + 1)
-                    self.window = self.window[self.base - self.nextseqnum:]
-                except socket.timeout:
-                    pass
-                finally:
-                    self.socket.settimeout(None)  # Reset the socket timeout to its default value
+                # Deal with data from standard input
+                elif conn == sys.stdin:
+                    while True:
+                        data = sys.stdin.read(DATA_SIZE)
+                        if len(data) == 0:
+                            break
+                        msg = { "type": "msg", "data": data, "seq": self.sequence_num, "timestamp": 0}
+                        self.sequence_num += 1
+                        msg["timestamp"] = time.time()                       
+                        checksum = json.dumps({"data": msg["data"]}).encode('utf-8')
+                        #msg["checksum"] = zlib.crc32(checksum) --> issue is it makes the packet too big (I needed to find a way around this)
+                        self.all_packets.append(msg)
 
-            self.waiting = False
+                    self.resend_dropped() 
+                    self.send_no_duplicate_packets()
+        return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')
