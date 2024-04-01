@@ -134,7 +134,6 @@ class Sender:
                         self.sequence_num += 1
                         msg["timestamp"] = time.time()                       
                         checksum = json.dumps({"data": msg["data"]}).encode('utf-8')
-                        #msg["checksum"] = zlib.crc32(checksum) --> issue is it makes the packet too big (I needed to find a way around this)
                         self.all_packets.append(msg)
 
                     self.resend_dropped() 
